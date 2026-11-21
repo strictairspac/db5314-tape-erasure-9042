@@ -133,19 +133,7 @@ def _signed_details(conn):
 
 
 def _ensure_rollup_row(conn):
-    """Create the single published rollup row and lock it for the transaction.
-
-    ``ON CONFLICT DO NOTHING`` / ``ON DUPLICATE KEY`` keeps two concurrent
-    first signatures from both inserting.  The subsequent ``SELECT ... FOR
-    UPDATE`` serialises every reviewer so each one recomputes from the full
-    signed set, which also makes a retried signature idempotent.
-    """
-    values = {'id': 1, 'report': rollup.empty_report(), 'updated_at': utc_time()}
-    statement = (mysql_insert(archive_rollup) if IS_MYSQL else postgres_insert(archive_rollup)).values(**values)
-    # ignore / do-nothing keeps a concurrent first signature from raising on the
-    # primary key; the row lock below then decides the order of the recomputes.
-    conn.execute(statement.prefix_with('IGNORE') if IS_MYSQL
-                 else statement.on_conflict_do_nothing(index_elements=['id']))
+    """Lock the pre-seeded singleton published rollup row."""
     return conn.execute(select(archive_rollup.c.id).where(archive_rollup.c.id == 1)
                         .with_for_update()).scalar_one()
 
@@ -190,8 +178,12 @@ def review(identity, note, actor):
 
 def archive_report():
     with engine.connect() as conn:
-        row = conn.execute(select(archive_rollup.c.report).order_by(archive_rollup.c.id.desc()).limit(1)).first()
-    return dict(row[0]) if row else rollup.empty_report()
+        batches = _signed_details(conn)
+        try:
+            return rollup.public_report(rollup.build_rollup(batches))
+        except rollup.ArchiveConflictError:
+            row = conn.execute(select(archive_rollup.c.report).where(archive_rollup.c.id == 1)).first()
+            return dict(row[0]) if row else rollup.empty_report()
 
 
 def reset_archive_for_tests():
