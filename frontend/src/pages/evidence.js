@@ -4,9 +4,21 @@ import {topic} from '../constants/project.js';
 import {date, el, esc} from '../utils/dom.js';
 import {submit} from '../hooks/submit.js';
 
+function rollupPanel(archive) {
+  if (!archive) return '';
+  const metrics = Object.entries(archive.metrics).map(([label,value])=>`<div><dt>${esc(label)}</dt><dd>${esc(value)}</dd></div>`).join('');
+  const gap = archive.gap_batches?.length
+    ? `<p class="note" data-testid="archive-gap">汇总缺口：${archive.gap_batches.length} 个旧签署批次缺少可核对明细，未计入汇总。</p>` : '';
+  const groups = archive.groups?.length ? records(['试镜类别','时长区间','样带数','演员数'], archive.groups.map(row=>[
+    esc(row['试镜类别']), esc(row['时长区间']), esc(row['样带数']), esc(row['演员数'])]))
+    : '<p class="empty">尚无达到人数门槛的分组。</p>';
+  return panel('跨批次匿名汇总', `<p>${esc(archive.summary)}</p><dl class="metrics">${metrics}</dl>${gap}${groups}`);
+}
+
 export function evidencePage(state, identity) {
   const current = state.evidence.find(row=>row.id===identity) || state.evidence[0];
-  if (!current) return heading(topic.modules[3]) + '<p class="empty">执行完成后，可查看、复核和导出证据。</p>';
+  const archive = rollupPanel(state.archive);
+  if (!current) return heading(topic.modules[3]) + archive + '<p class="empty">执行完成后，可查看、复核和导出证据。</p>';
   const {report} = current;
   const metrics = Object.entries(report.metrics).map(([label,value])=>`<div><dt>${esc(label)}</dt><dd>${esc(value)}</dd></div>`).join('');
   const sections = report.sections.map(x=>panel(x.title, entries(x.rows))).join('');
@@ -16,7 +28,7 @@ export function evidencePage(state, identity) {
   const history = state.evidence.map(row=>[`<a href="#evidence/${row.id}">执行 ${row.run_id}</a>`, esc(row.report.summary), esc(row.reviewer || '待复核')]);
   return `${heading(topic.modules[3], report.summary, `<button id="download" data-id="${current.id}">导出证据</button>`)}
     <div class="spread evidence-top"><dl class="metrics">${metrics}</dl><aside class="brief"><h2>复核签署</h2>${review}<details><summary>结果校验码</summary><code class="digest">${esc(current.digest)}</code></details></aside></div>
-    ${sections}<details><summary>历史证据</summary>${records(['执行','结论','复核'], history)}</details>`;
+    ${sections}${archive}<details><summary>历史证据</summary>${records(['执行','结论','复核'], history)}</details>`;
 }
 
 export function bindEvidence(api, update, fail) {

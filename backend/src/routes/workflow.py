@@ -54,6 +54,11 @@ def list_evidence(_=Depends(current_user)):
     return workflow.recent(evidence)
 
 
+@router.get('/archive')
+def archive(_=Depends(current_user)):
+    return workflow.archive_report()
+
+
 @router.get('/evidence/{identity}/download')
 def export_evidence(identity: int, _=Depends(current_user)):
     return download(identity)

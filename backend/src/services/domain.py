@@ -2,8 +2,9 @@
 
 from datetime import date
 
+from .archive_rollup import deleted_tape_details
 from .tape_erasure import (
-    KINDS, MIN_PERFORMERS, TRACKS, Asset, Catalog, Hold, apply_erasure, catalog_copy, plan_erasure,
+    BANDS, KINDS, MIN_PERFORMERS, TRACKS, Asset, Catalog, Hold, apply_erasure, catalog_copy, plan_erasure,
 )
 
 
@@ -163,6 +164,17 @@ def _retention_reason(asset_id, plan, before):
 
 
 def solve(payload, engine):
+    report, _ = solve_batch(payload)
+    return report
+
+
+def solve_batch(payload):
+    """Run one batch and return its public report plus the private tape details.
+
+    The details are the erased tapes' path, track, duration and performer.  They
+    are stored privately for the signed cross-batch rollup and never placed in
+    the public report or its digest.
+    """
     cutoff, catalog = _parse(payload)
     with catalog_copy(catalog) as db:
         before, after, plan, archive = apply_erasure(db, cutoff)
@@ -180,8 +192,8 @@ def solve(payload, engine):
             '前置步骤': '、'.join(map(str, predecessors or [1])),
         })
 
-    bands = ('少于 60 秒', '60 至 179 秒', '180 秒及以上')
-    return {
+    bands = BANDS
+    report = {
         'summary': f'已在隔离副本擦除 {tape_count} 条到期样带，留存 {len(after.assets)} 项资产，核验 {len(archive)} 组匿名归档。',
         'metrics': {
             '到期样带': len(plan.due_tapes), '擦除样带': tape_count,
@@ -206,3 +218,4 @@ def solve(payload, engine):
             ]},
         ],
     }
+    return report, deleted_tape_details(before, plan)

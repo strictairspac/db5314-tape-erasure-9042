@@ -4,7 +4,7 @@ from threading import Event, Thread
 from time import sleep
 
 from src.config.settings import ARTIFACTS, cache, engine
-from src.services.domain import solve
+from src.services.domain import solve_batch
 from src.services.workflow import claim, finish
 
 HEARTBEAT = Path(ARTIFACTS) / 'worker-heartbeat'
@@ -30,8 +30,8 @@ def work():
             thread = Thread(target=heartbeat, args=(stop,), daemon=True)
             thread.start()
             try:
-                result = solve(payload, engine)
-                finish(run_id, token, result=result)
+                result, details = solve_batch(payload)
+                finish(run_id, token, result=result, details=details)
             except (ValueError, KeyError, TypeError) as exc:
                 finish(run_id, token, error=str(exc)[:500])
             except Exception:

@@ -2,11 +2,15 @@ import hashlib
 import uuid
 
 from fastapi import HTTPException
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, delete, or_, select
+from sqlalchemy.dialects.mysql import insert as mysql_insert
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
 
-from src.config.settings import cache, engine
+from src.config.settings import IS_MYSQL, cache, engine
 from src.constants.workflow import Status
-from src.models.tables import audit, cases, evidence, runs
+from src.models.tables import (archive_rollup, audit, batch_details, batch_snapshots,
+                               cases, evidence, runs)
+from src.services import archive_rollup as rollup
 from src.services import domain
 from src.utils.encoding import canonical
 from src.utils.time import utc_time
@@ -76,7 +80,18 @@ def claim():
         return run.id, token, found(conn, cases, run.case_id)['payload']
 
 
-def finish(run_id, token, result=None, error=None):
+def _store_details(conn, evidence_id, details):
+    """Persist the private per-batch tape snapshot used by the signed rollup."""
+    conn.execute(batch_snapshots.insert().values(evidence_id=evidence_id, captured_at=utc_time()))
+    if details:
+        conn.execute(batch_details.insert(), [
+            {'evidence_id': evidence_id, 'object_key': detail.object_key, 'track': detail.track,
+             'duration_seconds': detail.duration_seconds, 'performer_id': detail.performer_id}
+            for detail in details
+        ])
+
+
+def finish(run_id, token, result=None, details=None, error=None):
     digest = hashlib.sha256(canonical(result)).hexdigest() if result is not None else None
     status = Status.FAILED if error else Status.COMPLETE
     with engine.begin() as conn:
@@ -86,8 +101,67 @@ def finish(run_id, token, result=None, error=None):
         if not count:
             return
         if result is not None:
-            conn.execute(evidence.insert().values(run_id=run_id, report=result, digest=digest))
+            evidence_id = conn.execute(evidence.insert().values(
+                run_id=run_id, report=result, digest=digest)).inserted_primary_key[0]
+            _store_details(conn, evidence_id, details or [])
         log(conn, 'worker', status.value, run_id)
+
+
+def _signed_details(conn):
+    """Return ``{evidence_id: rows or None}`` for every already-signed evidence.
+
+    ``None`` marks a legacy signature with no captured snapshot, which the
+    rollup must disclose as a gap rather than silently count as empty.
+    """
+    # Locking reads see the latest committed signatures/details rather than the
+    # transaction's opening snapshot, so a concurrent reviewer is not missed.
+    signed = conn.execute(select(evidence.c.id).where(evidence.c.reviewed_at.is_not(None))
+                          .with_for_update()).scalars().all()
+    if not signed:
+        return {}
+    snapshotted = set(conn.execute(
+        select(batch_snapshots.c.evidence_id).where(batch_snapshots.c.evidence_id.in_(signed))
+        .with_for_update()).scalars())
+    rows = {}
+    for row in conn.execute(select(batch_details.c.evidence_id, batch_details.c.object_key,
+                                   batch_details.c.track, batch_details.c.duration_seconds,
+                                   batch_details.c.performer_id)
+                            .where(batch_details.c.evidence_id.in_(signed))
+                            .with_for_update()).mappings():
+        rows.setdefault(row['evidence_id'], []).append(row)
+    return {identity: (rows.get(identity, []) if identity in snapshotted else None) for identity in signed}
+
+
+def _ensure_rollup_row(conn):
+    """Create the single published rollup row and lock it for the transaction.
+
+    ``ON CONFLICT DO NOTHING`` / ``ON DUPLICATE KEY`` keeps two concurrent
+    first signatures from both inserting.  The subsequent ``SELECT ... FOR
+    UPDATE`` serialises every reviewer so each one recomputes from the full
+    signed set, which also makes a retried signature idempotent.
+    """
+    values = {'id': 1, 'report': rollup.empty_report(), 'updated_at': utc_time()}
+    statement = (mysql_insert(archive_rollup) if IS_MYSQL else postgres_insert(archive_rollup)).values(**values)
+    # ignore / do-nothing keeps a concurrent first signature from raising on the
+    # primary key; the row lock below then decides the order of the recomputes.
+    conn.execute(statement.prefix_with('IGNORE') if IS_MYSQL
+                 else statement.on_conflict_do_nothing(index_elements=['id']))
+    return conn.execute(select(archive_rollup.c.id).where(archive_rollup.c.id == 1)
+                        .with_for_update()).scalar_one()
+
+
+def _write_rollup(conn, row_id, batches):
+    """Recompute and persist the merged rollup from a full snapshot under lock.
+
+    Counts are always recomputed from every signed batch, so retrying a
+    signature cannot double count.  The published row only moves forward when
+    the write commits together with the signature; a failure rolls back both
+    and readers keep the version they saw before.
+    """
+    computed = rollup.build_rollup(batches)
+    conn.execute(archive_rollup.update().where(archive_rollup.c.id == row_id)
+                 .values(report=rollup.public_report(computed), updated_at=utc_time()))
+    return computed
 
 
 def review(identity, note, actor):
@@ -96,9 +170,33 @@ def review(identity, note, actor):
         raise HTTPException(422, '复核意见不能为空')
     with engine.begin() as conn:
         found(conn, evidence, identity)
+        # Lock the published row first so the signed set is read after any
+        # concurrent reviewer commits, then compute the new totals from it.
+        row_id = _ensure_rollup_row(conn)
         count = conn.execute(evidence.update().where(evidence.c.id == identity, evidence.c.reviewed_at.is_(None))
                             .values(review_note=note, reviewer=actor, reviewed_at=utc_time())).rowcount
         if count != 1:
             raise HTTPException(409, '该证据已经复核')
+        # The signature and the new rollup share one transaction: a failed
+        # rollup write rolls the signature back and leaves the prior version.
+        batches = _signed_details(conn)
+        try:
+            _write_rollup(conn, row_id, batches)
+        except rollup.ArchiveConflictError as exc:
+            raise HTTPException(409, str(exc)) from None
         log(conn, actor, 'review', identity)
         return found(conn, evidence, identity)
+
+
+def archive_report():
+    with engine.connect() as conn:
+        row = conn.execute(select(archive_rollup.c.report).order_by(archive_rollup.c.id.desc()).limit(1)).first()
+    return dict(row[0]) if row else rollup.empty_report()
+
+
+def reset_archive_for_tests():
+    """Clear signed snapshots and the published rollup (test/demo helper)."""
+    with engine.begin() as conn:
+        conn.execute(delete(batch_details))
+        conn.execute(delete(batch_snapshots))
+        conn.execute(delete(archive_rollup))

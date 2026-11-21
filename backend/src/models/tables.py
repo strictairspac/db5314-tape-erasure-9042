@@ -38,3 +38,20 @@ audit = Table('audit_events', schema,
     Column('action', String(32), nullable=False),
     Column('reference', String(50), nullable=False),
     Column('created_at', String(32), nullable=False))
+# Private per-batch snapshot of erased tapes. Rows stay in the database and are
+# never returned to readers; only merged counts reach the anonymous archive.
+batch_snapshots = Table('archive_batch_snapshots', schema,
+    Column('id', Integer, primary_key=True),
+    Column('evidence_id', ForeignKey('business_evidence.id'), nullable=False, unique=True),
+    Column('captured_at', String(32), nullable=False))
+batch_details = Table('archive_batch_details', schema,
+    Column('id', Integer, primary_key=True),
+    Column('evidence_id', ForeignKey('business_evidence.id'), nullable=False, index=True),
+    Column('object_key', String(400), nullable=False),
+    Column('track', String(20), nullable=False),
+    Column('duration_seconds', Integer, nullable=False),
+    Column('performer_id', String(80), nullable=False))
+archive_rollup = Table('archive_rollup', schema,
+    Column('id', Integer, primary_key=True),
+    Column('report', JSON, nullable=False),
+    Column('updated_at', String(32), nullable=False))

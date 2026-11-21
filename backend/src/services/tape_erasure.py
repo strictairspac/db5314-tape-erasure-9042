@@ -12,7 +12,12 @@ from typing import NamedTuple
 
 KINDS = {'tape': '样带', 'transcript': '转写', 'master': '母版', 'audio': '音轨', 'still': '定帧'}
 TRACKS = {'dialogue': '对白', 'movement': '形体', 'voice': '配音'}
+BANDS = ('少于 60 秒', '60 至 179 秒', '180 秒及以上')
 MIN_PERFORMERS = 3
+
+
+def band_of(seconds):
+    return int(seconds >= 60) + int(seconds >= 180)
 
 
 class Asset(NamedTuple):

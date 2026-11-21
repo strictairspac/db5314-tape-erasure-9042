@@ -37,9 +37,9 @@ async function refresh() {
   const {key: page,id} = route();
   if (!pages[page]) { go('cases'); return; }
   try {
-    const result = await Promise.all([state.spec || api('/spec'),api('/cases'),api('/runs'),api('/evidence'),api('/audit')]);
+    const result = await Promise.all([state.spec || api('/spec'),api('/cases'),api('/runs'),api('/evidence'),api('/audit'),api('/archive')]);
     if (revision !== key) return;
-    [state.spec,state.cases,state.runs,state.evidence,state.audit]=result;
+    [state.spec,state.cases,state.runs,state.evidence,state.audit,state.archive]=result;
   } catch (error) {
     if (revision !== key) return;
     if (!document.getElementById('message')) app.innerHTML='<main><div id="message" role="alert"></div><button id="retry">重试</button></main>';
