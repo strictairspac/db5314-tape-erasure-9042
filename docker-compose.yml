@@ -1,0 +1,86 @@
+name: db5314-tape-erasure
+x-python: &python
+  build: ./backend
+  image: db5314-tape-erasure-app:local
+  environment:
+    DB_DRIVER: mysql+pymysql
+    DB_HOST: db
+    DB_NAME: workflow
+    DB_USER: app
+    DB_PASSWORD: ${DB_PASSWORD:-local-db-demo}
+    AUTH_KEY: ${AUTH_KEY:-dev-example-key-local-5300-change-me}
+    SEED_DEMO: ${SEED_DEMO:-true}
+    REDIS_URL: redis://redis:6379/0
+  volumes: [artifacts:/work]
+services:
+  frontend:
+    container_name: ${COMPOSE_PROJECT_NAME:-db5314-tape-erasure}-frontend
+    build: ./frontend
+    ports: ["127.0.0.1:${FRONTEND_PORT:-18303}:80"]
+    depends_on:
+      backend: {condition: service_healthy}
+    healthcheck:
+      test: [CMD-SHELL, "wget -qO- http://127.0.0.1/healthz && wget -qO- http://127.0.0.1/api/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+  backend:
+    <<: *python
+    container_name: ${COMPOSE_PROJECT_NAME:-db5314-tape-erasure}-backend
+    ports: ["127.0.0.1:${BACKEND_PORT:-19303}:8000"]
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+  worker:
+    <<: *python
+    container_name: ${COMPOSE_PROJECT_NAME:-db5314-tape-erasure}-worker
+    command: [python, -m, src.worker]
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      backend: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -c, "import os,time; assert time.time() - os.stat('/work/worker-heartbeat').st_mtime < 9"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+  db:
+    container_name: ${COMPOSE_PROJECT_NAME:-db5314-tape-erasure}-db
+    image: mysql:8.0
+    command: [mysqld, --innodb-buffer-pool-size=96M, --performance-schema=OFF]
+    environment:
+      MYSQL_DATABASE: workflow
+      MYSQL_USER: app
+      MYSQL_PASSWORD: ${DB_PASSWORD:-local-db-demo}
+      MYSQL_RANDOM_ROOT_PASSWORD: 'yes'
+    ports: ["127.0.0.1:${DB_PORT:-17803}:3306"]
+    volumes: [dbdata:/var/lib/mysql]
+    healthcheck:
+      test: [CMD-SHELL, 'MYSQL_PWD="$$MYSQL_PASSWORD" mysql --protocol=TCP -h127.0.0.1 -u app workflow -Nse "SELECT 1"']
+      interval: 3s
+      timeout: 3s
+      retries: 45
+  redis:
+    container_name: ${COMPOSE_PROJECT_NAME:-db5314-tape-erasure}-redis
+    image: redis:7-alpine
+    command: [redis-server, --appendonly, 'yes']
+    volumes: [redisdata:/data]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 3s
+      timeout: 2s
+      retries: 30
+volumes:
+  dbdata:
+  redisdata:
+  artifacts:
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${NETWORK_SUBNET:-10.239.53.208/28}
